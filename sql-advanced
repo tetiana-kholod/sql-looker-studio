@@ -1,0 +1,148 @@
+--Construction of a multi-dimensional analytical dataset from an e-commerce BigQuery database, with insights visualized in Looker Studio.
+
+
+--1 cte--Metrics by account
+WITH cte_account AS (
+  SELECT
+  s.date AS date,
+  sp.country AS country,
+  acc.send_interval AS send_interval,
+  acc.is_verified AS is_verified,
+  acc.is_unsubscribed AS is_unsubscribed,
+  COUNT(DISTINCT acc.id) AS account_cnt
+
+
+  FROM `DA.account` acc
+  JOIN `DA.account_session`  acs
+ON acc.id=acs.account_id
+JOIN `DA.session` s  
+ON acs.ga_session_id=s.ga_session_id
+JOIN `DA.session_params` sp
+ON acs.ga_session_id=sp.ga_session_id
+GROUP BY 1,2,3,4,5
+ORDER BY 1,2
+),
+
+
+--2 cte Metrics by emails
+cte_email AS (
+  SELECT
+  DATE_ADD(s.date,INTERVAL es.sent_date DAY) AS date,
+  sp.country AS country,
+  acc.send_interval AS send_interval,
+  acc.is_verified AS is_verified,
+  acc.is_unsubscribed AS is_unsubscribed,
+  COUNT (DISTINCT es.id_message) AS sent_msg,
+  COUNT (DISTINCT eo.id_message) AS open_msg,
+  COUNT (DISTINCT ev.id_message) AS visit_msg
+
+
+  FROM `DA.email_sent` es
+  LEFT JOIN `DA.email_open` eo
+  ON es.id_message=eo.id_message
+  LEFT JOIN `DA.email_visit` ev
+ON es.id_message=ev.id_message
+LEFT JOIN `DA.account` acc  
+ON es.id_account=acc.id
+JOIN `DA.account_session` acs
+ON acs.account_id=acc.id
+JOIN `DA.session` s
+ON s.ga_session_id=acs.ga_session_id
+JOIN `DA.session_params` sp
+ON acs.ga_session_id=sp.ga_session_id
+GROUP BY 1,2,3,4,5
+--ORDER BY date, country
+),
+--3 cte - Merging tables with account-level and email-level metrics
+cte_union_account_email AS  
+(
+SELECT
+  date,
+  country,
+  send_interval,
+  is_verified,
+  is_unsubscribed,
+  account_cnt,
+  0 AS sent_msg,
+0 AS open_msg,
+0 AS visit_msg
+FROM cte_account
+UNION ALL
+SELECT
+date,
+country,
+send_interval,
+is_verified,
+is_unsubscribed,
+0 AS account_cnt,
+sent_msg,
+open_msg,
+visit_msg
+FROM cte_email
+)
+,
+--4 cte - Calculating the total number of accounts and messages
+cte_union_upd AS
+(
+SELECT
+  date,
+  country,
+  send_interval,
+  is_verified,
+  is_unsubscribed,
+  SUM(account_cnt)AS account_cnt,
+  SUM(sent_msg) AS sent_msg,
+  SUM(open_msg) AS open_msg,
+  SUM(visit_msg) AS visit_msg
+FROM cte_union_account_email
+GROUP BY ALL)
+,
+--5 cte - Ranking countries by the number of accounts and sent messages
+cte_ranking AS
+(
+SELECT
+  country,
+  DENSE_RANK() OVER (ORDER BY SUM(account_cnt) DESC) AS rank_total_country_account_cnt,  
+  DENSE_RANK() OVER (ORDER BY SUM(sent_msg) DESC) AS rank_total_country_sent_cnt,
+FROM cte_union_upd
+GROUP BY country
+ORDER BY 2
+),
+--6 cte - Calculating the total number of accounts and sent messages for each country 
+cte_total_account_email_cnt AS (
+  SELECT
+  country,
+  SUM(account_cnt) AS total_country_account_cnt,
+  SUM(sent_msg) AS total_country_sent_cnt
+FROM cte_union_upd
+GROUP BY country)
+
+
+--FINAL - Displaying all account- and email-level metrics, including total counts and country rankings based on the overall number of accounts and sent emails — limited to the top 10 countries in each category.
+
+
+SELECT
+ cte_union_upd.date,
+  cte_union_upd.country AS country,
+  cte_union_upd.send_interval,
+  cte_union_upd.is_verified,
+  cte_union_upd.is_unsubscribed,
+  cte_union_upd.account_cnt,
+  cte_union_upd.sent_msg,
+  cte_union_upd.open_msg,
+  cte_union_upd.visit_msg,
+  total_country_account_cnt,
+  total_country_sent_cnt,
+  rank_total_country_account_cnt,
+rank_total_country_sent_cnt
+FROM cte_union_upd
+JOIN cte_total_account_email_cnt
+ON cte_total_account_email_cnt.country= cte_union_upd.country
+
+
+JOIN cte_ranking
+ON cte_union_upd.country=cte_ranking.country
+WHERE rank_total_country_account_cnt<=10
+AND rank_total_country_sent_cnt<=10
+
+
